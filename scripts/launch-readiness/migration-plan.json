@@ -1,0 +1,24 @@
+{
+  "account": "act_536168444946617",
+  "form": "https://forms.clickup.com/9018866787/f/8ct1z33-98838/0Y3JT1K2YWQZXETZEY",
+  "placeholderAudience": "120248335848500157",
+  "excludedAds": ["120248343629250157", "120248341103110157", "120248341318910157"],
+  "campaigns": [
+    {"id":"120248348513320157","source":"120248340995200157","name":"Parents Registration","budget":280000,"end":"2026-09-25T16:00:00+03:00","sets":[
+      {"name":"P-COLD | Parents | Prospecting","source":"120248340999170157","ads":["Ad01 Parents","Ad02 Parents GIF","Ad03 Parents"]},
+      {"name":"P-RETARGET | Parents | Video Viewers","source":"120248341001720157","warm":true,"ads":["Reel Angry Message Parents","Ad11 Parents"]},
+      {"name":"P-LASTCALL | Parents | 48h Blitz","source":"120248341000940157","warm":true,"ads":["Ad09 Parents","Ad07 Parents"]}
+    ]},
+    {"id":"120248348513350157","source":"120248340995120157","name":"Parents Messages","budget":140000,"end":"2026-09-25T16:00:00+03:00","sets":[
+      {"name":"P-MSG | Parents | Send a Message","source":"120248341103100157","messaging":true,"ads":["Ad12 Parents MSG","Reel Homework Parents MSG"]}
+    ]},
+    {"id":"120248348513400157","source":"120248340995090157","name":"Educators Registration","budget":180000,"end":"2026-09-26T16:00:00+03:00","sets":[
+      {"name":"E-COLD | Educators | Prospecting","source":"120248341001490157","ads":["Ad04 Educators","Ad10 Educators"]},
+      {"name":"E-RETARGET | Educators | Video Viewers","source":"120248340999120157","warm":true,"ads":["Reel Angry Message Educators"]},
+      {"name":"E-LASTCALL | Educators | 48h Blitz","source":"120248341000880157","warm":true,"ads":["Ad08 Educators","Ad06 Educators"]}
+    ]},
+    {"id":"120248348513430157","source":"120248340995080157","name":"Educators Messages","budget":100000,"end":"2026-09-26T16:00:00+03:00","sets":[
+      {"name":"E-MSG | Educators | Send a Message","source":"120248341318900157","messaging":true,"ads":["Reel Class Educators MSG","Ad11 Educators MSG"]}
+    ]}
+  ]
+}

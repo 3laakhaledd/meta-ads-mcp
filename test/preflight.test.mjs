@@ -1,0 +1,9 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { audit, sanitize } from '../scripts/launch-readiness/preflight.mjs';
+const plan = {campaigns:[{id:'1',name:'Parents',budget:700000,end:'2026-09-25T16:00:00+03:00',sets:[{name:'P-COLD',ads:['Ad01']}]}],form:'https://forms.example',placeholderAudience:'9'};
+const fixture=()=>({account:{account_status:1,timezone_name:'Africa/Cairo'},campaigns:[{id:'1',status:'PAUSED',lifetime_budget:'700000',sets:[{name:'P-COLD',status:'PAUSED',end_time:plan.campaigns[0].end,adset_schedule:[{start_minute:960,end_minute:1440,days:[0,1,2,3,4,5,6],timezone_type:'ADVERTISER'}],ads:[{name:'Ad01',status:'PAUSED',creative:{object_story_spec:{instagram_user_id:'123',link_data:{name:'h',message:'m',description:'d',image_hash:'x',call_to_action:{type:'SIGN_UP',value:{link:plan.form}}}}}}]}]}]});
+test('redacts secrets, URLs and pagination',()=>{assert.equal(JSON.stringify(sanitize({paging:{next:'secret'},access_token:'secret',error:'https://x/?token=secret'},['secret'])).includes('secret'),false);});
+test('missing campaigns cannot pass',()=>{const r=audit(plan,{campaigns:[]});assert(r.gaps.some(g=>g.issue==='Campaign unavailable'));assert.equal(r.ready,false);});
+test('valid schedule still requires tracking evidence',()=>{const r=audit(plan,fixture());assert(r.gaps.some(g=>g.scope==='tracking'));assert(!r.gaps.some(g=>g.issue==='Evening schedule not verified'));assert.equal(r.ready,false);});
+test('active ads and relative date copy are flagged',()=>{const s=fixture();s.campaigns[0].sets[0].ads[0].status='ACTIVE';s.campaigns[0].sets[0].ads[0].creative.object_story_spec.link_data.message='التسجيل بيقفل النهاردة';const r=audit(plan,s);assert(r.gaps.some(g=>g.issue==='Ad is not paused'));assert(r.gaps.some(g=>g.issue.startsWith('Relative-date')));});
