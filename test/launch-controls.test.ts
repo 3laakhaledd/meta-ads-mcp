@@ -23,13 +23,13 @@ function fixture(parent: Record<string, unknown> = { daily_budget: "10000" }) {
   registerLaunchControls({ tool: (name, _description, _schema, handler) => { handlers[name] = handler; } }, client);
   return { handlers, posts };
 }
-test("registers three isolated tools", () => {
-  assert.equal(Object.keys(fixture().handlers).length, 3);
+test("registers four isolated tools", () => {
+  assert.equal(Object.keys(fixture().handlers).length, 4);
 });
 test("audience forwards rules and defaults to validate only", async () => {
   const f = fixture();
-  await f.handlers.create_rule_audience({ name: "Viewers", subtype: "VIDEO", rule: '{"video_ids":["42"]}' });
-  assert.equal(f.posts[0].params.rule, '{"video_ids":["42"]}');
+  await f.handlers.create_rule_audience({ name: "Viewers", subtype: "ENGAGEMENT", rule: '[{"object_id":"42","event_name":"video_view_50_percent"}]' });
+  assert.equal(f.posts[0].params.rule, '[{"object_id":"42","event_name":"video_view_50_percent"}]');
   assert.equal(f.posts[0].params.execution_options, '["validate_only"]');
 });
 test("invalid JSON, arrays and empty rules make no writes", async () => {
