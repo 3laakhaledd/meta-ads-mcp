@@ -82,7 +82,15 @@ function response(data: unknown, dryRun: boolean) {
 }
 function guarded(fn: (args: any) => Promise<unknown>) {
   return async (args: unknown) => {
-    try { return await fn(args); }
+    try {
+      // MCP may already have applied Zod transforms before calling the handler.
+      const normalized = { ...(args as Record<string, unknown>) };
+      for (const key of ["rule", "targeting", "promoted_object"]) {
+        if (normalized[key] && typeof normalized[key] === "object")
+          normalized[key] = JSON.stringify(normalized[key]);
+      }
+      return await fn(normalized);
+    }
     catch (error) {
       // Do not echo API errors containing URLs or credentials.
       const text = error instanceof z.ZodError ? "Invalid launch-control arguments." :
