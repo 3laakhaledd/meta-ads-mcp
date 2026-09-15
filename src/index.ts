@@ -7,6 +7,7 @@ import { loadConfig, AdsConfig } from "./config.js";
 import { AdsClient } from "./services/ads-client.js";
 
 // --- Tool imports ---
+import { registerLaunchControls } from "./tools/launch-controls.js";
 import { registerCampaignTools } from "./tools/campaigns.js";
 import { registerAdsetTools } from "./tools/adsets.js";
 import { registerAdTools } from "./tools/ads.js";
@@ -46,6 +47,7 @@ const server = new McpServer({
 const config = loadConfig();
 const client = new AdsClient(config);
 
+registerLaunchControls(server, client);
 // --- Campaign Management ---
 registerCampaignTools(server, client);
 registerAdsetTools(server, client);
@@ -127,6 +129,7 @@ export function createSandboxServer() {
   };
   const mockClient = new AdsClient(mockConfig);
 
+  registerLaunchControls(sandbox, mockClient);
   registerCampaignTools(sandbox, mockClient);
   registerAdsetTools(sandbox, mockClient);
   registerAdTools(sandbox, mockClient);
