@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { safeMetaDiagnostic } from "./safe-meta-diagnostic.js";
 
 type Client = {
   get(path: string, params: Record<string, unknown>): Promise<{ data: unknown }>;
@@ -32,6 +33,8 @@ export function registerCampaignBudgetValidation(server: Registrar, client: Clie
     "Validate a campaign-level lifetime budget (CBO). Defaults to dry_run=true. Requires PAUSED campaign and expected current budgets. Explicitly clears daily budget. Apply revalidates, checks for concurrent changes, then reads back. Never activates campaigns or edits ad sets. Meta may reject budget-type conversion.",
     budgetSchema.shape, async (raw: unknown) => {
       let applied = false;
+      let stage = "input_validation";
+      let applyAttempted = false;
       try {
         const a = budgetSchema.parse(raw);
         const path = `/${a.campaign_id}`;
@@ -46,18 +49,24 @@ export function registerCampaignBudgetValidation(server: Registrar, client: Clie
           requireValid(Number(current.daily_budget || 0) > 0 || Number(current.lifetime_budget || 0) > 0,
             "Existing campaign must use campaign-level budgeting.");
         }
+        stage = "read_current";
         const before = await read();
         check(before);
         const params = { daily_budget: "0", lifetime_budget: a.lifetime_budget, status: "PAUSED" };
+        stage = "meta_validation";
         const validation = object((await client.post(path, {
           ...params, execution_options: JSON.stringify(["validate_only"]),
         })).data);
         requireValid(validation.success === true, "Meta did not confirm validation.");
         if (a.dry_run) return reply({ dry_run: true, validated: true, before, proposed: params });
+        stage = "concurrency_check";
         check(await read());
+        stage = "apply";
+        applyAttempted = true;
         const result = object((await client.post(path, params)).data);
         requireValid(result.success === true, "Meta did not confirm the update; inspect current state before retrying.");
         applied = true;
+        stage = "readback";
         const after = await read();
         const verified = after.status === "PAUSED" &&
           Number(after.daily_budget || 0) === 0 &&
@@ -68,7 +77,8 @@ export function registerCampaignBudgetValidation(server: Registrar, client: Clie
         const message = error instanceof z.ZodError ? "Invalid budget arguments." :
           error instanceof Error && error.message.startsWith("Validation:") ? error.message :
           "Meta request failed. Inspect campaign state before retrying; no automatic retry was performed.";
-        return reply({ applied, verified: false, message }, true);
+        return reply({ applied, applyAttempted, state_uncertain: applyAttempted && !applied,
+          stage, verified: false, message, diagnostic: safeMetaDiagnostic(error) }, true);
       }
     });
 }
