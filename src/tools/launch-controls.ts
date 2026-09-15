@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { safeMetaDiagnostic } from "./safe-meta-diagnostic.js";
 
 // Structural interfaces keep these handlers independently testable.
 type Client = {
@@ -45,6 +46,22 @@ const attribution = z.array(z.object({
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Duplicate event or invalid view window" });
 });
 const id = z.string().regex(/^\d+$/);
+const videoRules = z.array(z.object({
+  object_id: id,
+  event_name: z.enum(["video_watched", "video_completed", "video_view_10s",
+    "video_view_15s", "video_view_25_percent", "video_view_50_percent", "video_view_75_percent"]),
+}).strict()).min(1);
+const audienceRule = z.string().transform((text, ctx) => {
+  try {
+    const value = JSON.parse(text);
+    if (Array.isArray(value)) return videoRules.parse(value);
+    if (!value || typeof value !== "object" || !Object.keys(value).length) throw new Error();
+    return value as Record<string, unknown>;
+  } catch {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Expected an audience object or nonempty video-rule array" });
+    return z.NEVER;
+  }
+});
 const money = z.string().regex(/^[1-9]\d*$/);
 const date = z.string().datetime({ offset: true });
 const write = { dry_run: z.boolean().default(true).describe("Validate only by default. Set false only after approval.") };
@@ -52,7 +69,8 @@ const write = { dry_run: z.boolean().default(true).describe("Validate only by de
 export const audienceSchema = z.object({
   name: z.string().min(1),
   subtype: z.enum(["ENGAGEMENT", "VIDEO", "WEBSITE"]),
-  rule: jsonObject,
+  rule: audienceRule,
+  prefill: z.boolean().optional(),
   retention_days: z.number().int().min(1).max(180).optional(),
   pixel_id: id.optional(),
   account_id: z.string().optional(),
@@ -72,6 +90,13 @@ export const adsetSchema = z.object({
 }).strict();
 export const scheduleSchema = z.object({
   adset_id: id, adset_schedule: schedule, ...write,
+}).strict();
+export const campaignSchema = z.object({
+  name: z.string().trim().min(1),
+  account_id: z.string().regex(/^(act_)?\d+$/),
+  objective: z.enum(["OUTCOME_LEADS", "OUTCOME_ENGAGEMENT"]),
+  lifetime_budget: money.refine(v => Number.isSafeInteger(Number(v)), "Unsafe amount"),
+  ...write,
 }).strict();
 
 function payload(params: Record<string, unknown>, dryRun: boolean) {
@@ -96,7 +121,8 @@ function guarded(fn: (args: any) => Promise<unknown>) {
       const text = error instanceof z.ZodError ? "Invalid launch-control arguments." :
         error instanceof Error && error.message.startsWith("Validation:") ? error.message :
         "Meta request failed. Check permissions and API compatibility; no success is confirmed.";
-      return { isError: true, content: [{ type: "text" as const, text }] };
+      return { isError: true, content: [{ type: "text" as const,
+        text: JSON.stringify({ message: text, diagnostic: safeMetaDiagnostic(error) }) }] };
     }
   };
 }
@@ -104,14 +130,32 @@ function requireValid(ok: boolean, message: string): asserts ok {
   if (!ok) throw new Error(`Validation: ${message}`);
 }
 export function registerLaunchControls(server: Registrar, client: Client): void {
+  server.tool("create_lifetime_campaign",
+    "Create a PAUSED lifetime-budget CBO campaign. Defaults to validate-only; no ad sets or ads are created. Set dry_run=false only after approved migration preview. Set schedules separately on ad sets. Meta validates compatibility.",
+    campaignSchema.shape, guarded(async raw => {
+      const a = campaignSchema.parse(raw);
+      const params = {
+        name: a.name, objective: a.objective, lifetime_budget: a.lifetime_budget,
+        status: "PAUSED", buying_type: "AUCTION",
+        bid_strategy: "LOWEST_COST_WITHOUT_CAP", special_ad_categories: JSON.stringify([]),
+      };
+      const { data } = await client.post(`${client.accountPath(a.account_id)}/campaigns`, payload(params, a.dry_run));
+      const result = data as { success?: boolean; id?: string } | null;
+      requireValid(!!result && (a.dry_run ? result.success === true : !!result.id),
+        "Meta did not confirm campaign validation/creation.");
+      return response(data, a.dry_run);
+    }));
   server.tool("create_rule_audience",
     "Create a rule-based video/engagement/website audience. Defaults to validate-only. Meta validates rule semantics and source permissions; this does not populate viewers.",
     audienceSchema.shape, guarded(async raw => {
       const a = audienceSchema.parse(raw);
       requireValid(Object.keys(a.rule).length > 0, "Audience rule cannot be empty.");
+      requireValid(!Array.isArray(a.rule) || a.subtype === "ENGAGEMENT",
+        "Video-rule arrays require subtype ENGAGEMENT.");
+      requireValid(a.subtype !== "VIDEO", "Use subtype ENGAGEMENT with video-rule arrays.");
       requireValid(a.subtype !== "WEBSITE" || !!a.pixel_id, "Website audience requires pixel_id.");
       const { account_id, dry_run, rule, ...rest } = a;
-      const { data } = await client.post(`${client.accountPath(account_id)}/customaudiences`,
+      const { data, } = await client.post(`${client.accountPath(account_id)}/customaudiences`,
         payload({ ...rest, rule: JSON.stringify(rule) }, dry_run));
       return response(data, dry_run);
     }));
