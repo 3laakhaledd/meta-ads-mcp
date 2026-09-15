@@ -183,6 +183,8 @@ export function registerLaunchControls(server: Registrar, client: Client): void 
         ...rest, status: "PAUSED", billing_event: "IMPRESSIONS",
         targeting: JSON.stringify(targeting), promoted_object: JSON.stringify(promoted_object),
       };
+      // ABO must explicitly choose automatic bidding; CBO inherits its campaign strategy.
+      if (!cbo) params.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
       if (attribution_spec) params.attribution_spec = JSON.stringify(attribution_spec);
       if (adset_schedule) {
         params.adset_schedule = JSON.stringify(adset_schedule);
