@@ -32,6 +32,7 @@ import { registerAccountTools } from "./tools/account.js";
 import { registerBusinessTools } from "./tools/business.js";
 import { registerAuthTools } from "./tools/auth.js";
 import { registerAdLibraryTools } from "./tools/ad_library.js";
+import { registerPageMediaTools } from "./tools/page-media.js";
 
 // --- Resources & Prompts ---
 import { registerResources } from "./resources/account.js";
@@ -99,6 +100,9 @@ registerAuthTools(server, client);
 // --- Ad Library ---
 registerAdLibraryTools(server, client);
 
+// --- Page & Instagram Media ---
+registerPageMediaTools(server, client);
+
 // --- Resources & Prompts ---
 registerResources(server, client);
 registerPrompts(server);
@@ -156,6 +160,7 @@ export function createSandboxServer() {
   registerBusinessTools(sandbox, mockClient);
   registerAuthTools(sandbox, mockClient);
   registerAdLibraryTools(sandbox, mockClient);
+  registerPageMediaTools(sandbox, mockClient);
   registerResources(sandbox, mockClient);
   registerPrompts(sandbox);
 
