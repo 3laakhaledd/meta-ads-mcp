@@ -2,7 +2,33 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AdsClient } from "../services/ads-client.js";
 
-export function registerPageMediaTools(server: McpServer, client: AdsClient): void {
+const GRAPH_BASE = "https://graph.facebook.com/v26.0";
+
+/**
+ * Direct Graph API fetch using the Page Access Token.
+ * Falls back to META_ADS_ACCESS_TOKEN if META_PAGE_ACCESS_TOKEN is not set.
+ */
+async function pageGet(endpoint: string, params?: Record<string, unknown>): Promise<{ data: unknown }> {
+  const token = process.env.META_PAGE_ACCESS_TOKEN || process.env.META_ADS_ACCESS_TOKEN || "";
+  if (!token) throw new Error("No access token configured. Set META_PAGE_ACCESS_TOKEN or META_ADS_ACCESS_TOKEN.");
+
+  const qs = new URLSearchParams();
+  qs.set("access_token", token);
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+  }
+
+  const res = await fetch(`${GRAPH_BASE}/${endpoint}?${qs.toString()}`, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Graph API error (${res.status}): ${text}`);
+  }
+  return { data: await res.json() };
+}
+
+export function registerPageMediaTools(server: McpServer, _client: AdsClient): void {
 
   // ─── list_page_published_posts ─────────────────────────────────
   server.tool(
@@ -25,7 +51,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
         };
         if (after) params.after = after;
 
-        const { data, rateLimit } = await client.get(`/${pid}/published_posts`, params);
+        const { data } = await pageGet(`${pid}/published_posts`, params);
         const raw = data as { data?: Array<Record<string, unknown>>; paging?: Record<string, unknown> };
 
         const posts = (raw.data || []).map((p) => {
@@ -44,7 +70,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
 
         const paging = raw.paging as Record<string, unknown> | undefined;
         const cursors = (paging?.cursors as Record<string, string>) || {};
-        const result: Record<string, unknown> = { posts, count: posts.length, _rateLimit: rateLimit };
+        const result: Record<string, unknown> = { posts, count: posts.length };
         if (cursors.after) result.next_cursor = cursors.after;
 
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -75,7 +101,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
         };
         if (after) params.after = after;
 
-        const { data, rateLimit } = await client.get(`/${pid}/videos`, params);
+        const { data } = await pageGet(`${pid}/videos`, params);
         const raw = data as { data?: Array<Record<string, unknown>>; paging?: Record<string, unknown> };
 
         const videos = (raw.data || []).map((v) => {
@@ -93,7 +119,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
 
         const paging = raw.paging as Record<string, unknown> | undefined;
         const cursors = (paging?.cursors as Record<string, string>) || {};
-        const result: Record<string, unknown> = { videos, count: videos.length, _rateLimit: rateLimit };
+        const result: Record<string, unknown> = { videos, count: videos.length };
         if (cursors.after) result.next_cursor = cursors.after;
 
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -124,7 +150,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
         };
         if (after) params.after = after;
 
-        const { data, rateLimit } = await client.get(`/${igId}/media`, params);
+        const { data } = await pageGet(`${igId}/media`, params);
         const raw = data as { data?: Array<Record<string, unknown>>; paging?: Record<string, unknown> };
 
         const media = (raw.data || []).map((m) => {
@@ -141,7 +167,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
 
         const paging = raw.paging as Record<string, unknown> | undefined;
         const cursors = (paging?.cursors as Record<string, string>) || {};
-        const result: Record<string, unknown> = { media, count: media.length, _rateLimit: rateLimit };
+        const result: Record<string, unknown> = { media, count: media.length };
         if (cursors.after) result.next_cursor = cursors.after;
 
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
@@ -170,7 +196,7 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
           mediaId = mediaId * BigInt(64) + BigInt(idx);
         }
 
-        const { data, rateLimit } = await client.get(`/${mediaId.toString()}`, {
+        const { data } = await pageGet(mediaId.toString(), {
           fields: "id,caption,media_type,media_product_type,permalink,timestamp,thumbnail_url",
         });
         const m = data as Record<string, unknown>;
@@ -183,7 +209,6 @@ export function registerPageMediaTools(server: McpServer, client: AdsClient): vo
           product_type: m.media_product_type,
           permalink: m.permalink,
           timestamp: m.timestamp,
-          _rateLimit: rateLimit,
         };
 
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
