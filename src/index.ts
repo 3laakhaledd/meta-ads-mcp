@@ -33,6 +33,7 @@ import { registerBusinessTools } from "./tools/business.js";
 import { registerAuthTools } from "./tools/auth.js";
 import { registerAdLibraryTools } from "./tools/ad_library.js";
 import { registerPageMediaTools } from "./tools/page-media.js";
+import { registerConversationTools } from "./tools/conversations.js";
 
 // --- Resources & Prompts ---
 import { registerResources } from "./resources/account.js";
@@ -103,6 +104,9 @@ registerAdLibraryTools(server, client);
 // --- Page & Instagram Media ---
 registerPageMediaTools(server, client);
 
+// --- FB & IG Conversations ---
+registerConversationTools(server);
+
 // --- Resources & Prompts ---
 registerResources(server, client);
 registerPrompts(server);
@@ -161,6 +165,7 @@ export function createSandboxServer() {
   registerAuthTools(sandbox, mockClient);
   registerAdLibraryTools(sandbox, mockClient);
   registerPageMediaTools(sandbox, mockClient);
+  registerConversationTools(sandbox);
   registerResources(sandbox, mockClient);
   registerPrompts(sandbox);
 
