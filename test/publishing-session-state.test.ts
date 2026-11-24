@@ -38,8 +38,8 @@ test("approval consumption is atomic across actual child processes",()=>{
     const state=createFilePublishingState(f.root);const token="a".repeat(48);state.pending.set(token,{hash:"test-hash",expires:Date.now()+10000});
     const moduleURL=new URL("../src/tools/organic-publishing.js",import.meta.url).href;
     const code=`import {createFilePublishingState} from ${JSON.stringify(moduleURL)}; const s=createFilePublishingState(${JSON.stringify(f.root)});console.log(s.pending.delete(${JSON.stringify(token)}));`;
-    const a=spawnSync(process.execPath,["--input-type=module","-e",code],{encoding:"utf8"});
-    const b=spawnSync(process.execPath,["--input-type=module","-e",code],{encoding:"utf8"});
+    const a=spawnSync(process.execPath,[...(import.meta.url.endsWith(".ts")?["--import","tsx"]:[]),"--input-type=module","-e",code],{encoding:"utf8"});
+    const b=spawnSync(process.execPath,[...(import.meta.url.endsWith(".ts")?["--import","tsx"]:[]),"--input-type=module","-e",code],{encoding:"utf8"});
     assert.equal(a.status,0,a.stderr);assert.equal(b.status,0,b.stderr);
     assert.equal(a.stdout.trim(),"true");assert.equal(b.stdout.trim(),"false");
   }finally{f.close();}
