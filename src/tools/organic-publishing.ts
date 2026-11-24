@@ -13,7 +13,7 @@ export const PUBLISHED_POST_FIELDS =
   "id,message,created_time,permalink_url,full_picture,is_published,attachments{media_type,title,url}";
 
 type Registrar = { tool(name: string, description: string, schema: any, handler: any): unknown };
-type Request = (method: "GET" | "POST", path: string,
+type Request = (method: "GET" | "POST" | "DELETE", path: string,
   params?: Record<string, string>, token?: string) => Promise<Record<string, any>>;
 class PublishingFailure extends Error {
   constructor(readonly stage: string, readonly code: string,
@@ -50,12 +50,12 @@ type StateMap = Iterable<[string, any]> & {
 };
 type PublishingState = {
   scope: "container_local" | "process_local";
-  pending: StateMap; containers: StateMap; reels: StateMap;
-  claim(bucket: "containers" | "reels", key: string): () => void;
+  pending: StateMap; containers: StateMap; reels: StateMap; deletions: StateMap;
+  claim(bucket: "containers" | "reels" | "deletions", key: string): () => void;
 };
 export function createMemoryPublishingState(): PublishingState {
   const locks = new Set<string>();
-  return { scope: "process_local", pending: new Map(), containers: new Map(), reels: new Map(),
+  return { scope: "process_local", pending: new Map(), containers: new Map(), reels: new Map(), deletions: new Map(),
     claim(bucket, key) {
       const lock = `${bucket}.${key}`;
       if (locks.has(lock)) throw new PublishingFailure("state", "mutation_locked");
@@ -129,7 +129,7 @@ export function createFilePublishingState(root = join(tmpdir(), "meta-publishing
     return map;
   }
   return { scope: "container_local", pending: fileMap("pending"),
-    containers: fileMap("containers"), reels: fileMap("reels"),
+    containers: fileMap("containers"), reels: fileMap("reels"), deletions: fileMap("deletions"),
     claim(bucket, key) {
       const lock = path(bucket, key, "lock");
       try { const fd = openSync(lock, "wx", 0o600); closeSync(fd); }
@@ -237,13 +237,39 @@ async function checkedResponse(response: Response) {
 }
 export async function uploadFacebookReel(uploadUrl: string, videoId: string, videoUrl: string, token: string) {
   id.parse(videoId); publicUrl.parse(videoUrl);
-  const u = new URL(uploadUrl);
-  if (u.origin !== "https://rupload.facebook.com" || u.username || u.password ||
-    u.search || u.hash || !new RegExp(`^/video-upload/(?:v26\\.0/)?${videoId}$`).test(u.pathname))
-    throw new Error("Untrusted Meta upload URL");
-  await checkedResponse(await fetch(u, { method: "POST", redirect: "error",
-    headers: { Authorization: `OAuth ${token}`, file_url: videoUrl },
-    signal: AbortSignal.timeout(30000) }));
+  let u: URL;
+  try {
+    u = new URL(uploadUrl);
+    // Accept the version/path supplied by Meta, but only on the fixed host and exact video ID.
+    if (u.origin !== "https://rupload.facebook.com" || u.username || u.password ||
+      u.search || u.hash || !new RegExp(`^/video-upload/(?:v[1-9][0-9]?\\.[0-9]/)?${videoId}/?$`).test(u.pathname))
+      throw new Error("Rejected destination");
+  } catch { throw new PublishingFailure("facebook_upload", "upload_destination_rejected", false); }
+  let response: Response;
+  try {
+    response = await fetch(u, { method: "POST", redirect: "error",
+      headers: { Authorization: `OAuth ${token}`, file_url: videoUrl },
+      signal: AbortSignal.timeout(30000) });
+  } catch (error: any) {
+    const code = error?.cause?.code ?? error?.code;
+    const message = typeof error?.cause?.message === "string" ? error.cause.message.slice(0, 200) : "";
+    const failure = error?.name === "TimeoutError" || error?.name === "AbortError" ||
+      code === "UND_ERR_CONNECT_TIMEOUT" ? "upload_timeout" :
+      code === "ENOTFOUND" || code === "EAI_AGAIN" ? "upload_dns_failed" :
+      ["CERT_HAS_EXPIRED", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID",
+        "DEPTH_ZERO_SELF_SIGNED_CERT"].includes(code) ? "upload_tls_failed" :
+      ["ECONNRESET", "ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH"].includes(code) ? "upload_connection_failed" :
+      /unexpected redirect|redirect mode/i.test(message) ? "upload_redirect_rejected" :
+      code === "ERR_INVALID_CHAR" ? "upload_header_rejected" : "upload_transport_failed";
+    // Only fixed labels are exposed, never message text, nested causes, URLs or credentials.
+    throw new PublishingFailure("facebook_upload", failure, true);
+  }
+  let data: Record<string, any>;
+  try { data = await response.json() as Record<string, any>; }
+  catch { throw new PublishingFailure("facebook_upload", "upload_non_json_response", true,
+    { http_status: response.status }); }
+  if (!response.ok || data?.error || data?.success !== true)
+    throw new PublishingFailure("facebook_upload", "meta_rejected", true, providerCodes(data, response.status));
 }
 export async function uploadFacebookCover(videoId: string, bytes: Uint8Array, token: string) {
   id.parse(videoId);
@@ -293,11 +319,11 @@ export const graphRequest: Request = async (method, path, params = {}, token = m
     });
     const data = await response.json() as Record<string, any>;
     if (!response.ok || data.error)
-      throw new PublishingFailure("meta_graph", "meta_rejected", method === "POST", providerCodes(data, response.status));
+      throw new PublishingFailure("meta_graph", "meta_rejected", method !== "GET", providerCodes(data, response.status));
     return data;
   } catch (error) {
     if (error instanceof PublishingFailure) throw error;
-    throw new PublishingFailure("meta_graph", "transport_or_response_failed", method === "POST");
+    throw new PublishingFailure("meta_graph", "transport_or_response_failed", method !== "GET");
   }
 };
 
@@ -306,16 +332,17 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
   state: PublishingState = rawRequest === graphRequest ? createFilePublishingState() : createMemoryPublishingState()): void {
   // Production state is shared across session children on one container only.
   // Injected test transports remain isolated unless the caller supplies a state store.
-  const { pending, containers, reels } = state;
+  const { pending, containers, reels, deletions } = state;
   const request: Request = (method, path, params = {}, token) => {
-    const stage = params.fields === "id,access_token" ? "page_token" :
+    const stage = method === "DELETE" ? "facebook_delete" :
+      params.fields === "id,access_token" ? "page_token" :
       path.endsWith("/media_publish") ? "instagram_publish" :
       path.endsWith("/media") ? "instagram_container_create" :
       params.fields === "status_code" ? "instagram_status" :
       params.fields === "status" ? "facebook_status" :
       path.endsWith("/video_reels") ? (params.upload_phase === "start" ? "facebook_initialize" : "facebook_finish") :
       path.endsWith("/photos") || path.endsWith("/feed") ? "facebook_post" : "meta_read";
-    return operation(stage, method === "POST", () => rawRequest(method, path, params, token));
+    return operation(stage, method !== "GET", () => rawRequest(method, path, params, token));
   };
   type Reel = { owner: string; content: Omit<z.infer<typeof facebookReelSchema>, "approval_token" | "confidence">;
     blocked: boolean; submitted: boolean; coverHash?: string };
@@ -326,6 +353,7 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
     return page.access_token;
   }
   function trackedReel(pageId: string, videoId: string) {
+    if (deletions.has(videoId)) throw new PublishingFailure("state", "deletion_requires_reconciliation");
     const entry = reels.get(videoId);
     if (!entry || entry.owner !== pageId) throw new PublishingFailure("state", "unknown_reel");
     return entry as Reel;
@@ -333,7 +361,7 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
   function reelStatus(data: Record<string, any>) {
     // Do not echo provider errors/messages that could include credentials.
     const safe = (v: unknown) => typeof v === "string" &&
-      /^(?:ready|processing|error|expired|in_progress|not_started|complete|published|failed)$/i.test(v) ? v : "unknown";
+      /^(?:ready|uploading|processing|error|expired|in_progress|not_started|complete|published|failed)$/i.test(v) ? v : "unknown";
     return { video_status: safe(data.status?.video_status),
       uploading: safe(data.status?.uploading_phase?.status),
       processing: safe(data.status?.processing_phase?.status),
@@ -418,8 +446,64 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
         approval_state: !a.approval_token ? "not_checked" : !entry ? "missing_or_consumed" :
           entry.expires <= now() ? "expired" : "active",
         pending_approvals: pending.size, known_instagram_containers: containers.size,
-        known_facebook_reels: reels.size,
+        known_facebook_reels: reels.size, known_facebook_deletions: deletions.size,
         limitation: "Single container only. Replicas require shared durable storage or sticky routing. Reconcile IDs before restart; do not blindly retry ambiguous writes." });
+    }));
+  const deletePageVideoSchema = z.object({ page_id: id, video_id: id,
+    allow_published: z.boolean().default(false).describe("Default refuses live or unknown publication state. Explicit true must be included in the human-approved preview to delete those videos."),
+    ...approval }).strict();
+  async function deletionTarget(pageId: string, videoId: string, token: string) {
+    const video = await request("GET", `/${videoId}`, {
+      fields: "id,from,status,published,privacy",
+    }, token);
+    if (String(video.id) !== videoId || String(video.from?.id) !== pageId)
+      throw new PublishingFailure("ownership", "page_video_owner_mismatch");
+    const phases = reelStatus(video);
+    return { page_id: pageId, video_id: videoId, owner_id: String(video.from.id),
+      owner_name: typeof video.from.name === "string" ? video.from.name.slice(0, 160) : "",
+      published_flag: video.published === true, ...phases,
+      privacy: video.privacy?.value === "EVERYONE" ? "EVERYONE" : "not_verified_public" };
+  }
+  server.tool("delete_facebook_page_video",
+    "IRREVERSIBLY delete one Facebook Page-owned video using a freshly resolved Page access token, not the ads client. First call reads ownership/status and returns an exact-target approval preview; ZERO DELETE calls until explicit human approval. Default refuses live/unknown state. No automatic retries, permission changes or account fallback. Does not delete Instagram media or publish a replacement.",
+    deletePageVideoSchema.shape, guarded(async raw => {
+      const a = deletePageVideoSchema.parse(raw);
+      if (deletions.has(a.video_id))
+        throw new PublishingFailure("state", "deletion_requires_reconciliation");
+      if (deletions.size >= 1000) throw new PublishingFailure("state", "deletion_capacity_reached");
+      const token = await pageToken(a.page_id);
+      const target = await deletionTarget(a.page_id, a.video_id, token);
+      const definitelyIncomplete = target.publishing === "not_started" &&
+        ["uploading", "processing", "error"].includes(target.video_status);
+      if (!a.allow_published && !definitelyIncomplete)
+        throw new PublishingFailure("validation", "live_or_unknown_delete_not_allowed");
+      const preview = authorize({ ...a, target }, "facebook_page_video_delete");
+      if (preview) return preview;
+      // Same lock as Reel finalisation prevents racing a publish against deletion.
+      const release = state.claim("reels", a.video_id);
+      try {
+        if (deletions.has(a.video_id))
+          throw new PublishingFailure("state", "deletion_requires_reconciliation");
+        const current = await deletionTarget(a.page_id, a.video_id, token);
+        if (JSON.stringify(current) !== JSON.stringify(target))
+          throw new PublishingFailure("ownership", "delete_target_changed");
+        // Persist before networking. An ambiguous DELETE is never automatically replayed.
+        deletions.set(a.video_id, { page_id: a.page_id, attempted: true, confirmed: false });
+        const deleted = await request("DELETE", `/${a.video_id}`, {}, token);
+        if (deleted?.success !== true)
+          throw new PublishingFailure("facebook_delete", "deletion_not_confirmed", true);
+        try {
+          deletions.set(a.video_id, { page_id: a.page_id, attempted: true, confirmed: true });
+          const existing = reels.get(a.video_id);
+          if (existing) reels.set(a.video_id, { ...existing, blocked: true, deleted: true });
+        } catch {
+          return result({ status: "deleted_tracking_failed", deleted: true,
+            page_id: a.page_id, video_id: a.video_id,
+            instruction: "Meta confirmed deletion, but local tracking update failed. Do not retry deletion; reconcile manually." });
+        }
+        return result({ status: "deleted", page_id: a.page_id, video_id: a.video_id,
+          instruction: "Only this Facebook Page video was deleted. Instagram is unchanged. Any replacement requires its own publishing preview and approval." });
+      } finally { release(); }
     }));
   server.tool("publish_facebook_reel",
     "Publish a Facebook Page Reel with exact description and optional custom cover_url. Page Reels are PUBLIC. First call previews locally with ZERO network calls. Requires explicit human approval, identical content and a single-use approval token before upload or publication. No automatic retries; retain video_id for reconciliation. Container-local state spans MCP sessions on one replica, not redeploys. No scheduling.",
