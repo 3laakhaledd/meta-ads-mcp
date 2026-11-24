@@ -344,7 +344,7 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
       path.endsWith("/photos") || path.endsWith("/feed") ? "facebook_post" : "meta_read";
     return operation(stage, method !== "GET", () => rawRequest(method, path, params, token));
   };
-  type Reel = { owner: string; content: Omit<z.infer<typeof facebookReelSchema>, "approval_token" | "confidence">;
+  type Reel = { owner: string; content: Omit<z.infer<typeof facebookReelSchema>, "approval_token" | "confidence" | "video_url"> & { video_url?: string };
     blocked: boolean; submitted: boolean; coverHash?: string };
   async function pageToken(pageId: string): Promise<string> {
     const page = await request("GET", `/${pageId}`, { fields: "id,access_token" }, mainToken());
@@ -361,7 +361,7 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
   function reelStatus(data: Record<string, any>) {
     // Do not echo provider errors/messages that could include credentials.
     const safe = (v: unknown) => typeof v === "string" &&
-      /^(?:ready|uploading|processing|error|expired|in_progress|not_started|complete|published|failed)$/i.test(v) ? v : "unknown";
+      /^(?:ready|uploading|upload_complete|processing|error|expired|in_progress|not_started|complete|published|failed)$/i.test(v) ? v : "unknown";
     return { video_status: safe(data.status?.video_status),
       uploading: safe(data.status?.uploading_phase?.status),
       processing: safe(data.status?.processing_phase?.status),
@@ -381,10 +381,16 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
       return result({ status: state.publishing === "complete" ? "published" : "publication_submitted",
         page_id: entry.owner, video_id: videoId, ...state });
     }
-    if (state.uploading !== "complete" || state.processing !== "complete")
+    if (data.status?.uploading_phase?.error || data.status?.processing_phase?.error ||
+      data.status?.publishing_phase?.error || ["error", "failed", "expired"].includes(state.video_status) ||
+      ["error", "failed"].includes(state.processing))
+      throw new PublishingFailure("facebook_status", "facebook_phase_error");
+    // Meta's Step 3 ends the upload session and submits publication.
+    // Waiting for processing=complete here can deadlock an upload_complete video.
+    if (state.uploading !== "complete" || state.publishing !== "not_started" ||
+      !["not_started", "in_progress", "complete"].includes(state.processing))
       return result({ status: "reel_not_published", page_id: entry.owner, video_id: videoId, ...state,
-        instruction: "Read status; when upload and processing are complete, use publish_facebook_reel_upload with a fresh preview/approval. Do not create another Reel." });
-    if (state.publishing !== "not_started") throw new Error("Unverified publishing state");
+        instruction: "Read status; finish this same upload only after upload=complete and publishing=not_started with no phase errors, using a fresh preview/approval. Processing need not be complete. Do not recreate the Reel." });
     // Fail closed: apply requested cover before finish. Unknown thumbnail/finish outcomes cannot replay.
     entry.blocked = true;
     reels.set(videoId, entry);
@@ -550,7 +556,7 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
     }));
   const resumeSchema = z.object({ page_id: id, video_id: id, ...approval }).strict();
   server.tool("publish_facebook_reel_upload",
-    "Finish the SAME processing Facebook Reel tracked on this server container, with its original exact caption and cover. First call previews original content; new explicit approval required. Never creates/re-uploads videos, accepts foreign videos, or retries an ambiguous mutation.",
+    "Finish the SAME uploaded Facebook Reel tracked on this server container, with its original exact caption and cover. Upload must be complete; processing need not be complete. First call previews original content; new explicit approval required. Never creates/re-uploads videos, accepts foreign videos, or retries an ambiguous mutation.",
     resumeSchema.shape, guarded(async raw => {
       const a = resumeSchema.parse(raw), entry = trackedReel(a.page_id, a.video_id);
       if (entry.blocked || entry.submitted) throw new Error("Reel requires reconciliation");
@@ -569,6 +575,69 @@ export function registerOrganicPublishingTools(server: Registrar, rawRequest: Re
         return response;
       } catch (error) { return reconcile(a.video_id, trackedReel(a.page_id, a.video_id), error); }
       finally { release(); }
+    }));
+  const recoverySchema = z.object({ page_id: id, video_id: id,
+    description: z.string().max(63206).default(""), cover_url: publicUrl.optional(),
+    audience: z.literal("PUBLIC").default("PUBLIC"), ...approval }).strict();
+  function recoveryLocalGuard(pageId: string, videoId: string) {
+    if (deletions.has(videoId)) throw new PublishingFailure("state", "recovery_deletion_recorded");
+    const existing = reels.get(videoId);
+    if (existing && (existing.owner !== pageId || existing.blocked || existing.submitted || existing.deleted))
+      throw new PublishingFailure("state", "recovery_requires_reconciliation");
+  }
+  async function recoveryTarget(pageId: string, videoId: string, token: string) {
+    const video = await request("GET", `/${videoId}`, {
+      fields: "id,from,status,privacy,published",
+    }, token);
+    if (String(video.id) !== videoId || String(video.from?.id) !== pageId)
+      throw new PublishingFailure("ownership", "recovery_page_owner_mismatch");
+    if (video.privacy?.value !== "EVERYONE")
+      throw new PublishingFailure("visibility", "recovery_not_verified_public");
+    const phases = reelStatus(video);
+    if (video.status?.uploading_phase?.error || video.status?.processing_phase?.error ||
+      video.status?.publishing_phase?.error || ["error", "failed", "expired"].includes(phases.video_status))
+      throw new PublishingFailure("facebook_status", "facebook_phase_error");
+    if (phases.uploading !== "complete" || phases.publishing !== "not_started" ||
+      !["not_started", "in_progress", "complete"].includes(phases.processing))
+      throw new PublishingFailure("facebook_status", "recovery_not_safe_to_finish");
+    return { page_id: pageId, video_id: videoId, owner_id: String(video.from.id),
+      owner_name: typeof video.from.name === "string" ? video.from.name.slice(0, 160) : "",
+      privacy: "EVERYONE", ...phases };
+  }
+  server.tool("recover_facebook_reel_upload",
+    "Recover and finish ONE existing Facebook Page Reel after local state was lost on deployment. NEVER creates, uploads or deletes a video. Reads Page ownership, public privacy, completed upload and unstarted publication; rejects phase errors and known blocked/submitted/deleted state. First call previews exact target/caption/cover and fetched cover SHA-256 with ZERO Meta mutations. Requires a fresh explicit human approval before applying the cover and submitting finish for that SAME video. Processing may be not_started. No automatic retries.",
+    recoverySchema.shape, guarded(async raw => {
+      const a = recoverySchema.parse(raw);
+      recoveryLocalGuard(a.page_id, a.video_id);
+      const token = await pageToken(a.page_id);
+      const target = await recoveryTarget(a.page_id, a.video_id, token);
+      const cover = a.cover_url ? await operation("cover_fetch", false,
+        () => transport.loadCover(a.cover_url!)) : undefined;
+      const cover_sha256 = cover ? createHash("sha256").update(cover).digest("hex") : null;
+      const preview = authorize({ ...a, target, cover_sha256 }, "facebook_reel_recovery");
+      if (preview) return preview;
+      const release = state.claim("reels", a.video_id);
+      try {
+        recoveryLocalGuard(a.page_id, a.video_id);
+        const current = await recoveryTarget(a.page_id, a.video_id, token);
+        if (JSON.stringify(current) !== JSON.stringify(target))
+          throw new PublishingFailure("ownership", "recovery_target_changed");
+        const entry: Reel = { owner: a.page_id, blocked: true, submitted: false,
+          content: { page_id: a.page_id, description: a.description, audience: a.audience,
+            ...(a.cover_url ? { cover_url: a.cover_url } : {}) },
+          ...(cover_sha256 ? { coverHash: cover_sha256 } : {}) };
+        try {
+          reels.set(a.video_id, entry);
+          const response = await finishReel(a.video_id, entry, token, cover);
+          if (!entry.submitted) entry.blocked = false;
+          reels.set(a.video_id, entry);
+          return response;
+        } catch (error) {
+          entry.blocked = true;
+          try { reels.set(a.video_id, entry); } catch {}
+          return reconcile(a.video_id, entry, error);
+        }
+      } finally { release(); }
     }));
   server.tool("publish_facebook_post",
     "Publish a Facebook Page text/link post or single photo. First call is a local preview with ZERO Meta writes. Re-call identical content with approval_token and confidence=approved only after explicit user approval. No scheduling, videos or reels.",
