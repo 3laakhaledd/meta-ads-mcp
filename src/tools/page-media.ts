@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AdsClient } from "../services/ads-client.js";
+import { PUBLISHED_POST_FIELDS, registerOrganicPublishingTools } from "./organic-publishing.js";
 
 const GRAPH_BASE = "https://graph.facebook.com/v26.0";
 
@@ -29,6 +30,7 @@ async function pageGet(endpoint: string, params?: Record<string, unknown>): Prom
 }
 
 export function registerPageMediaTools(server: McpServer, _client: AdsClient): void {
+  registerOrganicPublishingTools(server);
 
   // ─── list_page_published_posts ─────────────────────────────────
   server.tool(
@@ -46,7 +48,7 @@ export function registerPageMediaTools(server: McpServer, _client: AdsClient): v
           return { content: [{ type: "text" as const, text: "Provide page_id or set META_PAGE_ID env var." }], isError: true };
         }
         const params: Record<string, unknown> = {
-          fields: "id,message,created_time,permalink_url,type,full_picture,is_published,attachments{type,media_type,title,url}",
+          fields: PUBLISHED_POST_FIELDS,
           limit: Math.min(limit ?? 10, 100),
         };
         if (after) params.after = after;
@@ -63,8 +65,8 @@ export function registerPageMediaTools(server: McpServer, _client: AdsClient): v
             message_preview: msg.length > 120 ? msg.slice(0, 120) + "..." : msg,
             created_time: p.created_time,
             permalink_url: p.permalink_url,
-            type: p.type,
-            attachment: att ? { type: att.type, media_type: att.media_type, title: att.title } : null,
+            type: att?.media_type,
+            attachment: att ? { type: att.media_type, media_type: att.media_type, title: att.title } : null,
           };
         });
 
